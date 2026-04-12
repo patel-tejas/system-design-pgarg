@@ -312,4 +312,219 @@ Try implementing:
 
 ---
 
-🔥 Learn by building, not just reading.
+# 📘 System Design – Crash Course (Part 2)
+
+---
+
+## 🚀 Introduction
+
+This part dives deeper into real-world system design concepts:
+
+- Traffic patterns and scalability
+- Serverless architecture (AWS Lambda)
+- Virtualization vs Containers
+- Kubernetes (container orchestration)
+
+💡 System design is not fixed — it evolves based on use case and traffic.
+
+---
+
+## 🧠 Core Idea: Trade-offs
+
+Every system balances:
+- Scalability
+- Reliability
+- Cost
+
+You cannot maximize all three at once.
+
+---
+
+## 📊 Traffic Patterns (Most Important)
+
+Understanding traffic is key to system design.
+
+---
+
+### 🎥 Netflix (Predictable Traffic)
+
+- Movies release on fixed dates
+- Traffic spikes are predictable
+
+Strategy:
+- Pre-scale servers
+- Cache content in CDN
+- Prepare before release
+
+---
+
+### ▶️ YouTube (Unpredictable Traffic)
+
+- Sudden spikes anytime
+- Viral content, live streams
+
+Strategy:
+- Always keep extra capacity
+- Handle unpredictable spikes
+
+---
+
+### 🏏 Hotstar (Mixed Traffic)
+
+- Movies + Live streaming
+
+Behavior:
+- Match start → spike
+- Player events → spike
+- Users go back → spike on home API
+
+Key insight:
+Traffic in one service affects another.
+
+---
+
+## ⚡ Traditional Server Problems
+
+- Manual scaling
+- OS management
+- Infrastructure complexity
+
+---
+
+## ☁️ Serverless (AWS Lambda)
+
+### Idea:
+Write code → Cloud handles everything
+
+### How:
+- Each request triggers a function
+- Auto scaling per request
+
+---
+
+### ✅ Pros:
+- No server management
+- Auto scaling
+- Pay per request
+
+---
+
+### ❌ Cons:
+
+- Cold start latency
+- Stateless (no memory)
+- Execution time limits
+- Vendor lock-in
+- Hidden costs (API Gateway, S3, etc.)
+- DB connection overload
+
+---
+
+## 🖥️ Virtualization (VMs)
+
+### Idea:
+Full virtual machines with OS
+
+Pros:
+- Consistent environment
+
+Cons:
+- Heavy (GBs)
+- Slow
+- Expensive
+
+---
+
+## 📦 Containerization (Docker)
+
+### Idea:
+Lightweight VMs without OS
+
+- Share host OS
+- Only include code + dependencies
+
+---
+
+### Benefits:
+- Fast startup
+- Lightweight
+- Easy scaling
+- Consistent environment
+
+---
+
+## ⚠️ New Problem
+
+Many containers → hard to manage
+
+---
+
+## 🧠 Container Orchestration
+
+Automating:
+- Deployment
+- Scaling
+- Management
+
+---
+
+## ☸️ Kubernetes
+
+### Built by Google
+
+Inspired by Borg → open sourced
+
+---
+
+### What it does:
+
+- Auto scaling
+- Self-healing
+- Rolling updates
+- Load balancing
+
+---
+
+### Example:
+
+Old containers replaced gradually → zero downtime
+
+---
+
+## 🧱 Modern Architecture
+
+User  
+↓  
+CDN  
+↓  
+Load Balancer  
+↓  
+API Gateway  
+↓  
+Containers (Docker)  
+↓  
+Kubernetes  
+↓  
+Database  
+
+---
+
+## 🔥 Final Learning
+
+- Traffic pattern defines architecture
+- Serverless is simple but limited
+- Containers are industry standard
+- Kubernetes manages everything
+
+---
+
+## 🧠 Real World Practice
+
+- Load testing before events
+- Simulating traffic spikes
+- Monitoring system limits
+
+---
+
+
+
