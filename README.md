@@ -526,5 +526,224 @@ Database
 
 ---
 
+# 📘 System Design – Event Sourcing (Detailed Guide)
+
+---
+
+## 🚀 Introduction
+
+Event Sourcing is a powerful system design pattern where **every change is stored as an event instead of updating the current state directly**.
+
+👉 Instead of storing:
+- Current state (like balance = 500)
+
+We store:
+- All events (deposit, withdraw, etc.)
+
+---
+
+## 🧠 What is an Event?
+
+An event = something that happened in the system.
+
+Examples:
+- User added item to cart
+- User placed order
+- Video uploaded
+- Payment completed
+
+---
+
+## ❌ Problem with Traditional CRUD
+
+In normal systems:
+- We directly update DB rows
+
+Problems:
+1. Race conditions
+2. DB locks → bottleneck
+3. No history
+4. Hard debugging
+5. State inconsistency
+
+---
+
+## 🎥 Real Example: Video Processing
+
+Flow:
+1. Upload video → DB status = uploaded
+2. Worker picks → status = processing
+3. Done → status = success
+
+❌ Problem:
+If DB update fails → wrong state forever
+
+---
+
+## ⚡ Event Sourcing Approach
+
+Instead of updating DB:
+
+We store events like:
+
+- VideoUploaded
+- VideoProcessingStarted
+- VideoProcessed
+
+These are stored in **append-only logs**
+
+---
+
+## 📜 Event Log
+
+- Immutable (never change)
+- Append-only
+- Ordered
+
+Example:
+[VideoUploaded]  
+[ProcessingStarted]  
+[ProcessingCompleted]  
+
+---
+
+## 🔄 Hydration (Rebuilding State)
+
+To get current state:
+- Replay all events
+
+Example:
+Uploaded → Processing → Success
+
+Final state = Success
+
+---
+
+## 💰 Banking Example
+
+Instead of:
+balance = 500
+
+We store:
+- +200
+- +300
+- -500
+
+Replay:
+500 + 200 + 300 - 500 = 500
+
+---
+
+## 🔁 Replay (Superpower)
+
+You can:
+- Debug issues
+- Audit history
+- Time travel (state at past time)
+
+---
+
+## ⚡ Performance Problem
+
+Reading all events every time is slow
+
+Solution:
+👉 Maintain a **read model (cache DB)**
+
+- Events → update cache
+- Reads → from cache
+
+---
+
+## 🧠 Key Architecture
+
+Write Path:
+User → Event → Event Store
+
+Read Path:
+Event Store → Cache DB → User
+
+---
+
+## ⚠️ Ordering Problem
+
+Multiple workers can break order
+
+Solution:
+👉 Partitioning (Kafka)
+
+Each entity → fixed partition
+
+---
+
+## 🔥 Kafka Concepts
+
+- Topic → stream
+- Partition → ordered subset
+- Consumer group → workers
+
+Guarantee:
+Same entity → same partition → order maintained
+
+---
+
+## 🧱 CQRS (Important)
+
+Command = write  
+Query = read  
+
+We separate both:
+- Write → events
+- Read → cache DB
+
+---
+
+## ✅ Advantages
+
+- Full audit trail
+- Easy debugging
+- Time travel
+- High scalability
+- Event-driven systems
+
+---
+
+## ❌ Disadvantages
+
+- Complex to implement
+- Hard to migrate later
+- Event versioning needed
+- Storage grows over time
+
+---
+
+## 🏢 Real World Usage
+
+Used by:
+- Uber
+- Netflix
+- Amazon
+
+---
+
+## 💡 Final Insight
+
+👉 State is temporary  
+👉 Events are permanent  
+
+Event Sourcing = thinking in history, not current value
+
+---
+
+## 🔥 Learning Tip
+
+Think like this:
+
+Instead of:
+“what is the current state?”
+
+Think:
+“how did we reach here?”
+
 
 
