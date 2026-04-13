@@ -2026,3 +2026,497 @@ Do **not** use CQRS for:
 *Summary based on a Hindi tutorial video on CQRS System Design Pattern.*
 
 ![crqs image](cqrs.png)
+
+
+# 📚 System Design: Rate Limiting
+
+> **Source:** [Piyush Garg - Master Rate Limiting](https://www.youtube.com/watch?v=CVItTb_jdkE)  
+> **Topic:** Rate Limiting — What it is, algorithms to implement it, and trade-offs of each.
+
+---
+
+## Table of Contents
+
+1. [What is Rate Limiting?](#1-what-is-rate-limiting)
+2. [Why Rate Limiting is Necessary](#2-why-rate-limiting-is-necessary)
+3. [High-Level Architecture](#3-high-level-architecture)
+4. [Rate Limiting Algorithms](#4-rate-limiting-algorithms)
+   - [Token Bucket](#41-token-bucket-algorithm)
+   - [Leaky Bucket](#42-leaky-bucket-algorithm)
+   - [Fixed Window Counter](#43-fixed-window-counter-algorithm)
+   - [Sliding Window Log](#44-sliding-window-log-algorithm)
+   - [Sliding Window Counter](#45-sliding-window-counter-algorithm-hybrid)
+5. [Algorithm Comparison Table](#5-algorithm-comparison-table)
+6. [Key Takeaways](#6-key-takeaways)
+
+---
+
+## 1. What is Rate Limiting?
+
+> **Definition:** Rate limiting is a technique used to **control the rate of requests** a client can make to a server within a defined time window.
+
+When a client exceeds the allowed limit, the server rejects excess requests with:
+
+```
+HTTP 429 Too Many Requests
+```
+
+### Real-World Analogy
+
+Think of a highway toll booth. Only a fixed number of cars can pass per minute. If too many cars arrive at once, extras are turned away and told to wait. The toll booth is your **rate limiter**.
+
+---
+
+## 2. Why Rate Limiting is Necessary
+
+Every server is just a machine with finite resources:
+
+```
+Server Specs Example:
+┌──────────────────────────┐
+│  vCPU:  2                │
+│  RAM:   4 GB             │
+│  Safe capacity: ~100 req/min │
+└──────────────────────────┘
+```
+
+| Request Volume | Outcome |
+|---|---|
+| ≤ 100 req/min | ✅ Safe, server performs well |
+| ~150 req/min | ⚠️ Performance degradation starts |
+| ≥ 200 req/min | ❌ Server likely crashes |
+
+**Problems without rate limiting:**
+- A single bad actor (or buggy client) can send thousands of requests and **take down your server**
+- No protection against **DDoS attacks**
+- No fairness — one user can starve all others of resources
+
+---
+
+## 3. High-Level Architecture
+
+```
+User
+ │
+ ▼
+┌─────────────────────┐
+│     Rate Limiter    │  ← checks: are we within threshold?
+└─────────────────────┘
+       │          │
+       │ YES      │ NO
+       ▼          ▼
+   Server      Drop Request
+  (Process)   (Return 429)
+       │
+       ▼
+   Response → User
+```
+
+The rate limiter sits **between** the user and your server. It acts as a gatekeeper, only allowing traffic through if the request count is within the configured threshold.
+
+---
+
+## 4. Rate Limiting Algorithms
+
+There are **5 main algorithms** used to implement rate limiting:
+
+1. Token Bucket
+2. Leaky Bucket
+3. Fixed Window Counter
+4. Sliding Window Log
+5. Sliding Window Counter (Hybrid)
+
+---
+
+### 4.1 Token Bucket Algorithm
+
+> **Used by:** Amazon, Stripe, and most major API providers.
+
+#### Concept
+
+Imagine a physical bucket that holds tokens (coins). A refiller continuously adds tokens at a fixed rate. Every incoming request must consume one token to be processed. If the bucket is empty, the request is rejected.
+
+#### Visual Diagram
+
+```
+            Refiller
+          (3 tokens/sec)
+               │
+               ▼
+    ┌─────────────────────┐
+    │  🪙 🪙 🪙           │  ← Bucket (capacity: 5)
+    │                     │
+    └─────────────────────┘
+               │
+    ┌──────────┴──────────┐
+    │                     │
+  Token               No Token
+ Available?          Available?
+    │                     │
+    ▼                     ▼
+Process Request      Reject (429)
+```
+
+#### How It Works — Step by Step
+
+```
+Initial State: Bucket has 0 tokens
+─────────────────────────────────────
+Second 1: Refiller adds 3 tokens → Bucket: [🪙🪙🪙]
+
+Request 1 arrives → consume token → Bucket: [🪙🪙] → ✅ Allowed
+Request 2 arrives → consume token → Bucket: [🪙]   → ✅ Allowed
+Request 3 arrives → consume token → Bucket: []      → ✅ Allowed
+Request 4 arrives → no token!     → Bucket: []      → ❌ Rejected (429)
+
+Second 2: Refiller adds 3 tokens → Bucket: [🪙🪙🪙]
+(Repeat cycle...)
+
+Note: If no requests come for 2 seconds:
+  Bucket fills to max capacity (5), never exceeds it.
+```
+
+#### Parameters
+
+| Parameter | Description | Example |
+|---|---|---|
+| `bucket_size` | Max tokens the bucket can hold | 5 |
+| `refill_rate` | Tokens added per second | 3/sec |
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---|---|
+| Simple to implement | Hard to tune two parameters in production |
+| Memory efficient | Burst traffic at boundary moments possible |
+| Allows short bursts of traffic | — |
+| Used by major companies (Amazon, Stripe) | — |
+
+---
+
+### 4.2 Leaky Bucket Algorithm
+
+#### Concept
+
+Imagine a bucket with a **small hole at the bottom**. No matter how fast water (requests) pours in from the top, it only leaks out at a **fixed, steady rate**. This smooths out bursty traffic into a uniform flow.
+
+#### Visual Diagram
+
+```
+Users → Requests pour in from top (any rate)
+              │
+              ▼
+    ┌─────────────────────┐
+    │  Req  Req  Req      │  ← Bucket / Queue (capacity: 10,000)
+    │  Req  Req           │
+    └──────────┬──────────┘
+               │  (small hole)
+               │  Fixed rate: 5 req/min
+               ▼
+           Processing
+           (Server)
+```
+
+#### How It Works
+
+```
+Incoming: 20,000 requests/min  ← doesn't matter how fast
+Outgoing: 5 requests/min       ← always fixed
+
+If bucket is NOT full → queue the request
+If bucket IS full     → reject with 429
+```
+
+#### Shower Analogy
+
+> Your overhead tank has 1500 litres. If you open it directly, you'd be crushed by the pressure. Instead, a pipe + showerhead controls the *flow rate* — you get a comfortable, fixed stream. The leaky bucket works the same way.
+
+#### Parameters
+
+| Parameter | Description |
+|---|---|
+| `bucket_size` | Max queue capacity before rejecting |
+| `leak_rate` | Fixed rate at which requests are processed |
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---|---|
+| Smooths out traffic bursts | Burst traffic fills queue with old requests |
+| Memory efficient | New (potentially important) requests may never get processed |
+| Predictable, stable outflow rate | Two parameters are tricky to tune |
+
+---
+
+### 4.3 Fixed Window Counter Algorithm
+
+#### Concept
+
+Divide the timeline into **fixed-size time windows** (e.g., 1 second each). Count requests in each window. If count exceeds threshold → reject. When the window ends → reset the counter.
+
+#### Visual Diagram
+
+```
+Timeline:
+─────────────────────────────────────────────────────
+|   Window 1  |   Window 2  |   Window 3  |
+|   (0s–1s)   |   (1s–2s)   |   (2s–3s)  |
+─────────────────────────────────────────────────────
+
+Threshold = 3 req/window
+
+Window 1: req1, req2, req3         → Counter: 3 → ✅ all allowed
+          req4 arrives             → Counter: 4 → ❌ rejected
+
+Window 2: RESET counter to 0
+          req1, req2               → Counter: 2 → ✅ all allowed
+
+Window 3: RESET counter to 0
+          req1, req2, req3, req4   → Counter: 4 → ❌ req4 rejected
+```
+
+#### The Critical Bug 🐛
+
+The Fixed Window algorithm has a fundamental flaw: **edge bursts**.
+
+```
+Window 1 (0s–1s)       Window 2 (1s–2s)
+─────────────────────────────────────────
+            │ req req req │ req req req │
+            │             │             │
+                  ↑
+        0.5s ───────────── 1.5s
+        This 1-second span also has 6 requests!
+        But our limit is 3/sec.
+        We just allowed 2× the intended limit.
+```
+
+A malicious user can intentionally time their requests at window boundaries to **double the allowed throughput**.
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---|---|
+| Simple to implement | **Edge burst problem** — can exceed limit at window boundaries |
+| Easy to understand | Not precise for strict rate enforcement |
+| Works fine for lenient rate limiting | — |
+
+---
+
+### 4.4 Sliding Window Log Algorithm
+
+> **Fixes the edge burst problem of Fixed Window Counter.**
+
+#### Concept
+
+Instead of fixed windows with counters, **maintain a log (list) of timestamps** for every request. When a new request arrives, remove all expired timestamps from the log, then check if the log size is within the threshold.
+
+#### Visual Diagram
+
+```
+Threshold: 3 requests per 5 seconds
+Log: [] (empty initially)
+
+Timeline:
+─────────────────────────────────────────────────────
+Sec 1: Request arrives
+  Log: [1] → size=1 < 3 → ✅ Allowed
+
+Sec 3: Request arrives
+  Log: [1, 3] → size=2 < 3 → ✅ Allowed
+
+Sec 4.5: Request arrives
+  Log: [1, 3, 4] → size=3 = 3 → ✅ Allowed (at limit)
+
+Sec 6: Request arrives
+  → Remove expired (sec 1 is outside 5-sec window from sec 6)
+  Log after cleanup: [3, 4]
+  Log after adding: [3, 4, 6] → size=3 = 3 → ✅ Allowed
+
+Sec 7: Two requests arrive
+  → Remove expired (sec 2 outside window — nothing here)
+  Log: [3, 4, 6] → size=3 = 3 already → ❌ Both rejected
+
+Sec 8: Request arrives
+  → Remove expired (sec 3 is now outside 5-sec window from sec 8)
+  Log after cleanup: [4, 6]
+  Log: [4, 6, 8] → size=3 = 3 → ✅ Allowed
+```
+
+#### The "Sliding" Part
+
+```
+Sliding Window (size = 5 sec):
+
+At t=6:    [1  2  3  4  5  |6]   → 1 slides out
+At t=7:    [   2  3  4  5  6  |7] → 2 slides out
+At t=8:    [      3  4  5  6  7  |8] → 3 slides out
+
+The window always covers the most recent 5 seconds.
+```
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---|---|
+| **Fixes edge burst problem** | Higher memory usage (storing all timestamps) |
+| Very accurate rate limiting | Expensive for high-traffic systems |
+| No abrupt resets | — |
+
+---
+
+### 4.5 Sliding Window Counter Algorithm (Hybrid)
+
+> **Best of both worlds: Fixed Window Counter + Sliding Window Log**
+
+#### Concept
+
+Keep the **fixed window structure** (for efficiency), but **approximate a sliding window** using the previous window's count weighted by how much of the current window has elapsed.
+
+#### Formula
+
+```
+Effective Count = (Previous Window Count × Overlap %) + Current Window Count
+```
+
+Where **Overlap %** = how much of the previous window overlaps with the current sliding window.
+
+#### Visual Example
+
+```
+Threshold = 3 req/window
+
+Previous Window (2s–3s): 2 requests
+Current Window  (3s–4s): starts, new request arrives at t=3.1
+
+Overlap calculation:
+  t=3.1 is 10% into the current window
+  → Previous window's overlap = 90%
+  → Weighted count from previous = 2 × 0.9 = 1.8
+
+  Effective Count = 1.8 + 1 (current) = 2.8 → rounds to 2 or 3
+  → Below threshold of 3 → ✅ Allowed
+```
+
+#### Another Example (Rejection)
+
+```
+Previous Window: 3 requests
+Current Window: request arrives at t = 20% into current window
+
+  Overlap = 80%
+  Weighted count from previous = 3 × 0.8 = 2.4
+  + Current window count = 1
+  Effective Count = 3.4 → ❌ Rejected (exceeds threshold of 3)
+```
+
+#### Diagram
+
+```
+─────────────────────────────────────────────────────
+|    Previous Window     |     Current Window        |
+|  count = 3             |   new request here        |
+|                        |   ← 30% into window →     |
+─────────────────────────────────────────────────────
+                    ↑
+        Previous 70% is still "active"
+        Effective = (3 × 0.70) + current_count
+```
+
+#### Pros & Cons
+
+| ✅ Pros | ❌ Cons |
+|---|---|
+| Fixes edge burst problem | Approximate, not 100% precise |
+| Memory efficient (just two counters) | Slightly complex logic |
+| Better than Fixed Window alone | — |
+| Scales well in production | — |
+
+---
+
+## 5. Algorithm Comparison Table
+
+| Algorithm | Memory Usage | Handles Bursts | Fixes Edge Bug | Complexity | Best For |
+|---|---|---|---|---|---|
+| **Token Bucket** | Low | ✅ Yes | N/A | Low | APIs with burst tolerance (AWS, Stripe) |
+| **Leaky Bucket** | Low | ❌ Smooths them | N/A | Low | Stable outflow systems |
+| **Fixed Window Counter** | Very Low | ✅ Yes | ❌ No | Very Low | Simple, lenient rate limiting |
+| **Sliding Window Log** | High | ❌ Strict | ✅ Yes | Medium | Strict, precise rate limiting |
+| **Sliding Window Counter** | Low | ✅ Yes | ✅ Approx | Medium | Production systems needing accuracy + efficiency |
+
+---
+
+## 6. Key Takeaways
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   Rate Limiting Summary                       │
+├──────────────────────────────────────────────────────────────┤
+│                                                               │
+│  1. Rate limiting protects servers from overload and abuse    │
+│                                                               │
+│  2. HTTP 429 = Too Many Requests (the rate limit error code)  │
+│                                                               │
+│  3. Token Bucket — refillable tokens; allows bursts           │
+│                                                               │
+│  4. Leaky Bucket — fixed outflow via queue; smooths traffic   │
+│                                                               │
+│  5. Fixed Window Counter — simple but has edge burst bug      │
+│                                                               │
+│  6. Sliding Window Log — accurate, high memory cost           │
+│                                                               │
+│  7. Sliding Window Counter — hybrid, best for production      │
+│                                                               │
+│  8. Both Token Bucket and Leaky Bucket have 2 parameters      │
+│     to tune: capacity & rate. Hard to get right in prod.      │
+│                                                               │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Decision Guide
+
+```
+Do you need burst tolerance?
+        │
+       YES → Token Bucket
+        │
+       NO
+        │
+Do you need a stable, uniform output rate?
+        │
+       YES → Leaky Bucket
+        │
+       NO
+        │
+Do you need simplicity and approximate accuracy?
+        │
+       YES → Fixed Window Counter (watch for edge bursts)
+        │
+       NO
+        │
+Do you need strict precision (memory not a concern)?
+        │
+       YES → Sliding Window Log
+        │
+       NO
+        │
+       → Sliding Window Counter (best balance for production)
+```
+
+---
+
+## Further Reading
+
+- [ByteByteGo — System Design Interview (Chapter 3: Rate Limiting)](https://bytebytego.com)
+- [Cloudflare — Rate Limiting Docs](https://developers.cloudflare.com/waf/rate-limiting-rules/)
+- [AWS API Gateway — Throttling](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html)
+- [Stripe API Rate Limits](https://stripe.com/docs/rate-limits)
+
+---
+
+> **Previous Video (by Piyush Garg):** Event Sourcing  
+> **Next Topic to explore:** CQRS — Command Query Responsibility Segregation
+
+---
+
+*Notes compiled from: [Master Rate Limiting - System Design by Piyush Garg](https://www.youtube.com/watch?v=CVItTb_jdkE)*
