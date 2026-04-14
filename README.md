@@ -2520,3 +2520,1344 @@ Do you need strict precision (memory not a concern)?
 ---
 
 *Notes compiled from: [Master Rate Limiting - System Design by Piyush Garg](https://www.youtube.com/watch?v=CVItTb_jdkE)*
+
+
+# 📚 System Design: Consistent Hashing
+
+> **Source:** [Piyush Garg - Consistent Hashing](https://www.youtube.com/watch?v=IC5Y1EE-aj4)  
+> **Topic:** Hashing → Simple Hashing Problems → Consistent Hashing with Ring Mechanism → Virtual Nodes
+
+---
+
+## Table of Contents
+
+1. [The Problem: Horizontal Scaling](#1-the-problem-horizontal-scaling)
+2. [What is a Hash Function?](#2-what-is-a-hash-function)
+3. [Simple Hashing: How It Works](#3-simple-hashing-how-it-works)
+4. [The Critical Problem with Simple Hashing](#4-the-critical-problem-with-simple-hashing)
+5. [What is Consistent Hashing?](#5-what-is-consistent-hashing)
+6. [The Hash Ring (Ring Mechanism)](#6-the-hash-ring-ring-mechanism)
+7. [Adding & Removing Servers in Consistent Hashing](#7-adding--removing-servers-in-consistent-hashing)
+8. [The Hotspot Problem & Virtual Nodes](#8-the-hotspot-problem--virtual-nodes)
+9. [Benefits Summary](#9-benefits-summary)
+10. [Real-World Usage](#10-real-world-usage)
+11. [Key Takeaways](#11-key-takeaways)
+
+---
+
+## 1. The Problem: Horizontal Scaling
+
+When your application grows and a single database can't handle the load, you **horizontally scale** — adding more database instances.
+
+```
+Before (Single DB):
+┌──────────┐
+│  DB (1)  │ ← handles 100% of load → BOTTLENECK
+└──────────┘
+
+After (Horizontal Scaling):
+┌──────────┐  ┌──────────┐  ┌──────────┐
+│  DB [0]  │  │  DB [1]  │  │  DB [2]  │
+└──────────┘  └──────────┘  └──────────┘
+  ~33% load     ~33% load     ~33% load
+```
+
+**The new challenge:** With multiple databases, how do you decide *which database* stores or retrieves a particular piece of data? You need a **consistent, deterministic** way to route data.
+
+---
+
+## 2. What is a Hash Function?
+
+> **Definition:** A **hash function** is a deterministic function that takes an input (e.g., user ID) and always returns the same output. It determines which partition/server a piece of data belongs to.
+
+### Key Properties:
+
+| Property | Description |
+|---|---|
+| **Deterministic** | Same input → always same output |
+| **Fixed-size output** | Output is always within a defined range |
+| **One-way** | Cannot reverse the output back to the input |
+| **Load distribution** | Ideally spreads data evenly across servers |
+
+### Bad Hash Function (Random):
+```javascript
+function f(userId) {
+  return Math.random(); // WRONG — random output every time
+}
+// Problem: userId=1 might map to DB[2] on insert,
+//          but DB[0] on lookup → data never found!
+```
+
+### Good Hash Function (Deterministic):
+```javascript
+function f(userId) {
+  return userId % numberOfServers; // CORRECT — same output always
+}
+
+// Example with 3 servers:
+f(1) = 1 % 3 = 1  → DB[1]
+f(2) = 2 % 3 = 2  → DB[2]
+f(3) = 3 % 3 = 0  → DB[0]
+f(4) = 4 % 3 = 1  → DB[1]
+f(5) = 5 % 3 = 2  → DB[2]
+```
+
+This hash function also acts as a **load balancer** — distributing data roughly equally across servers.
+
+---
+
+## 3. Simple Hashing: How It Works
+
+With the formula `userId % numberOfServers`:
+
+```
+Users:  Piyush(1), John(2), Jane(3), Alex(4), Tiger(5)
+Servers: DB[0], DB[1], DB[2]
+
+1 % 3 = 1 → Piyush → DB[1]
+2 % 3 = 2 → John   → DB[2]
+3 % 3 = 0 → Jane   → DB[0]
+4 % 3 = 1 → Alex   → DB[1]
+5 % 3 = 2 → Tiger  → DB[2]
+```
+
+This works perfectly — as long as the **number of servers never changes**.
+
+---
+
+## 4. The Critical Problem with Simple Hashing
+
+### Scenario: You Add a 4th Server
+
+Your traffic grows. You spin up a new database: `DB[3]`. Now `numberOfServers = 4`.
+
+```javascript
+// Hash function changes from:
+userId % 3
+// to:
+userId % 4
+```
+
+**Re-calculating where data should live:**
+
+```
+1 % 4 = 1 → Piyush → DB[1]  ✅ (was DB[1], OK)
+2 % 4 = 2 → John   → DB[2]  ✅ (was DB[2], OK)
+3 % 4 = 3 → Jane   → DB[3]  ❌ (was DB[0], WRONG!)
+4 % 4 = 0 → Alex   → DB[0]  ❌ (was DB[1], WRONG!)
+5 % 4 = 1 → Tiger  → DB[1]  ❌ (was DB[2], WRONG!)
+```
+
+**3 out of 5 keys are now mapped to the WRONG server!**
+
+When Jane tries to retrieve her data, the hash function returns `3` (DB[3]), but her data actually lives in `DB[0]` → **data not found!**
+
+### The Scale Problem
+
+```
+Real world scenario:
+  5 million keys stored across 3 servers
+  You add 1 new server
+
+  Result: ~3 million keys need to be physically moved
+          between servers → MASSIVE data migration!
+```
+
+> **Root Cause:** Changing `numberOfServers` by even 1 reshuffles the majority of keys. This makes adding or removing servers extremely expensive.
+
+---
+
+## 5. What is Consistent Hashing?
+
+> **Definition:** Consistent Hashing is a technique that minimizes the number of keys that need to be remapped when servers are added or removed. Instead of `key % N`, it uses a **ring (circular) structure** where both data and servers are placed on the ring using a hash function.
+
+**The core promise:** When a server is added or removed, only a **small fraction** of keys need to be moved — not the majority.
+
+---
+
+## 6. The Hash Ring (Ring Mechanism)
+
+### Step 1: Create the Ring
+
+Imagine a number line from 0 to some max value (e.g., 0–12), bent into a circle (like a clock face). The hash function maps any input to a number within this range.
+
+```
+        12
+    11      1
+  10          2
+  9     ⊙     3      ← Hash Ring (0–12)
+  10          4
+    7       5
+        6
+```
+
+### Step 2: Place Servers on the Ring
+
+Each server has a unique identifier (e.g., IP address). Hash the server's identifier → place it at that position on the ring.
+
+```
+Server A → hash(A) = 2  → placed at position 2
+Server B → hash(B) = 5  → placed at position 5
+Server C → hash(C) = 9  → placed at position 9
+
+        12
+    11      1
+  10          [A=2]
+  [C=9]  ⊙   3
+  8           4
+    7    [B=5]
+        6
+```
+
+### Step 3: Place Data on the Ring
+
+Hash each data key → place it on the ring → **go clockwise** until you hit the first server → store data there.
+
+```
+Data key K → hash(K) = position → go clockwise → first server found
+
+Example:
+  hash(K1) = 1  → clockwise → hits A(2)  → stored in Server A
+  hash(K2) = 3  → clockwise → hits B(5)  → stored in Server B
+  hash(K3) = 6  → clockwise → hits C(9)  → stored in Server C
+  hash(K4) = 10 → clockwise → hits A(2 via 12→1→2) → stored in Server A
+
+        12
+    11   K1  1
+  10          [A=2] ← K1, K2 stored here... wait
+  [C=9]  ⊙   K2=3
+  K4=10       4
+    7    [B=5]
+        K3=6
+```
+
+**Rule:** Every data key is stored in the **first server found when travelling clockwise** from the key's position.
+
+---
+
+## 7. Adding & Removing Servers in Consistent Hashing
+
+### Adding a New Server
+
+Say you add Server D → `hash(D) = 12`.
+
+```
+Before (D added):
+  K4 (at 10) → clockwise → Server A (at 2, wrapping around)
+
+After (D added at 12):
+  K4 (at 10) → clockwise → Server D (at 12) ← NEW!
+```
+
+**Only keys between the previous server (C at 9) and the new server (D at 12) need to move.**
+
+```
+Keys that need remapping = keys in range (9 → 12]
+Keys NOT affected = everything else ✅
+```
+
+```
+Finding affected range:
+  New server D is at position 12
+  Previous server (anti-clockwise) is C at position 9
+  Affected keys = those in range (9, 12] → only K4
+
+  All other keys: NO CHANGE ✅
+```
+
+### Removing a Server
+
+If Server B (at position 5) goes down:
+
+```
+Keys affected = keys that were pointing to B
+These keys now travel clockwise to the NEXT server (C at 9)
+
+Only keys in range (2, 5] need remapping.
+Everything else: NO CHANGE ✅
+```
+
+### Comparison: Simple vs Consistent Hashing
+
+| Operation | Simple Hashing | Consistent Hashing |
+|---|---|---|
+| Add 1 server (3→4) | ~75% of keys move | Only keys in 1 arc move |
+| Remove 1 server (3→2) | ~50% of keys move | Only keys from that arc move |
+| Calculate affected keys | Must rehash everything | Simple range: prev_server → new_server |
+
+---
+
+## 8. The Hotspot Problem & Virtual Nodes
+
+### The Problem
+
+Even with consistent hashing, if servers land unevenly on the ring, some servers handle far more data than others.
+
+```
+Bad placement (servers too close together):
+
+        12
+    11      1
+  10          2
+  [C=3]       [A=4]    ← A and C are very close!
+  8       [B=5]
+    7       
+        6
+
+Result:
+  Arc B→C = tiny (3 to 4) → very few keys → B underloaded
+  Arc C→A? No, arc A→B = large (5 to 3 going clockwise) → MANY keys → B overloaded!
+```
+
+One server ends up being a **hotspot**, handling the majority of requests. This defeats the purpose of load balancing.
+
+### Solution: Virtual Nodes
+
+> **Definition:** Virtual Nodes (VNodes) are multiple "fake" positions on the ring that all point to the same physical server. Each real server is represented by several positions on the ring, distributing its load more evenly.
+
+```
+Physical servers: A, B, C
+
+Virtual node placement:
+  A → hash(A-1) = 2,  hash(A-2) = 7,  hash(A-3) = 11
+  B → hash(B-1) = 4,  hash(B-2) = 9
+  C → hash(C-1) = 1,  hash(C-2) = 6,  hash(C-3) = 10
+
+        12
+    [A=11]   [C=1]
+  [C=10]       [A=2]
+  [B=9]  ⊙   3
+  8      [B=4] 4
+    [A=7] [C=6]
+        5
+```
+
+Now data is distributed much more evenly across all three physical servers, even if their primary hash positions would have been uneven.
+
+**How it works at lookup:**
+- Data key hashes to position X on the ring
+- Go clockwise, hit the first virtual node
+- That virtual node is a pointer to the actual physical server
+- Route to that physical server
+
+---
+
+## 9. Benefits Summary
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Consistent Hashing Benefits                     │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  1. MINIMAL KEY REDISTRIBUTION                               │
+│     Only keys in the affected arc move when servers          │
+│     are added or removed (not the majority)                  │
+│                                                              │
+│  2. EASY TO CALCULATE AFFECTED KEYS                          │
+│     Affected range = (previous_server, new_server]           │
+│     Simple clockwise scan, no full rehash needed             │
+│                                                              │
+│  3. EASY HORIZONTAL SCALING                                  │
+│     Add/remove servers without massive data migrations        │
+│                                                              │
+│  4. HOTSPOT MITIGATION (with Virtual Nodes)                  │
+│     VNodes spread load evenly even with uneven placement      │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 10. Real-World Usage
+
+| System | How Consistent Hashing is Used |
+|---|---|
+| **Amazon DynamoDB** | Partition data across nodes |
+| **Apache Cassandra** | Distribute data across cluster |
+| **Discord** | Route chat data to servers |
+| **CDNs (Akamai, Cloudflare)** | Route requests to edge servers |
+| **Redis Cluster** | Shard keys across nodes |
+
+---
+
+## 11. Key Takeaways
+
+```
+Simple Hashing:     key % N  (breaks when N changes)
+Consistent Hashing: hash ring + clockwise lookup (N-change safe)
+
+Adding a server  → only keys in (prev_node, new_node] move
+Removing server  → only keys from that arc move to next server
+Uneven ring      → solve with Virtual Nodes
+```
+
+### Decision Flow
+
+```
+Need to distribute data across multiple servers?
+          │
+          ▼
+    Use a Hash Function
+          │
+  Will the number of servers change (scale up/down)?
+          │
+         YES
+          │
+          ▼
+    Use Consistent Hashing (Hash Ring)
+          │
+    Are some servers getting more load than others?
+          │
+         YES
+          │
+          ▼
+    Add Virtual Nodes
+```
+
+---
+
+## Further Reading
+
+- [ByteByteGo — Consistent Hashing](https://bytebytego.com)
+- [Amazon DynamoDB — Partitioning](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.Partitions.html)
+- [Apache Cassandra — Data Distribution](https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html)
+
+---
+
+*Notes compiled from: [Consistent Hashing - System Design by Piyush Garg](https://www.youtube.com/watch?v=IC5Y1EE-aj4)*
+
+# 📚 System Design: How Video Streaming Works at Scale
+
+> **Source:** [Piyush Garg - How Video Streaming Works on Scale](https://www.youtube.com/watch?v=-JtjQ-OA7XE)  
+> **Topic:** What is a video → Progressive Download → RTMP/RTSP → Adaptive Bitrate Streaming → HLS & MPEG-DASH
+
+---
+
+## Table of Contents
+
+1. [What is a Video?](#1-what-is-a-video)
+2. [The Problem: Streaming at Scale](#2-the-problem-streaming-at-scale)
+3. [Era 1: Progressive Download](#3-era-1-progressive-download)
+4. [Era 2: Real-Time Streaming Protocols (RTMP/RTSP)](#4-era-2-real-time-streaming-protocols-rtmprtsp)
+5. [Era 3: Adaptive Bitrate Streaming (ABR)](#5-era-3-adaptive-bitrate-streaming-abr)
+6. [HLS: HTTP Live Streaming](#6-hls-http-live-streaming)
+7. [How Segments & the M3U8 Index File Work](#7-how-segments--the-m3u8-index-file-work)
+8. [Video Processing Pipeline](#8-video-processing-pipeline)
+9. [MPEG-DASH vs HLS](#9-mpeg-dash-vs-hls)
+10. [Evolution Timeline](#10-evolution-timeline)
+11. [Key Takeaways](#11-key-takeaways)
+
+---
+
+## 1. What is a Video?
+
+> **Definition:** A video is a **sequence of images (frames)** played in rapid succession. Your brain perceives this as continuous motion.
+
+```
+Frame 1 → Frame 2 → Frame 3 → Frame 4 → Frame 5 ...
+  📷          📷         📷         📷         📷
+              (played rapidly = motion perceived)
+```
+
+### Frame Rate (FPS — Frames Per Second)
+
+| FPS | Experience |
+|---|---|
+| 1 fps | Very choppy (slideshow-like) |
+| 24 fps | Cinema standard |
+| 30 fps | Smooth TV standard |
+| 60 fps | Very smooth (gaming/sports) |
+| 120+ fps | Ultra smooth |
+
+The higher the FPS, the more images per second → smoother experience → but also **larger file size**.
+
+### Why Video Files Are Large
+
+A 1-hour video at 60 fps = 60 × 3600 = **216,000 individual frames**.  
+Even a "small" modern video can easily be **4–5 GB** after compression.
+
+Formats like **MP4** store these frames in a compressed sequence that computers can decode and play back.
+
+---
+
+## 2. The Problem: Streaming at Scale
+
+The central engineering challenge:
+
+> How do you deliver a 4–5 GB video file to millions of users across different devices, screen sizes, and network speeds — smoothly, without buffering?
+
+### Devices Today
+
+```
+4K LED TV         → needs high resolution, fast connection
+Laptop            → medium screen, decent connection
+Mobile Phone      → small screen, varies from WiFi to 3G
+Smartwatch        → tiny screen, low bandwidth
+Smart Fridge      → ???
+```
+
+**One video quality does NOT fit all devices.** A 4K stream is wasteful on a smartwatch. A tiny bitrate looks terrible on a 65" TV.
+
+---
+
+## 3. Era 1: Progressive Download
+
+The earliest approach to video delivery on the internet.
+
+### How it worked
+
+```
+Client                     Server
+  │                           │
+  │── GET /video.mp4 ─────────►│
+  │                           │
+  │◄── (download entire file)─│
+  │                           │
+  │  [wait... wait... wait]   │
+  │  100MB downloading...     │
+  │                           │
+  │  [finally] play video     │
+```
+
+**You had to download the entire video file before you could watch it.**
+
+### Why it was bad
+
+```
+Modern video: 4–5 GB
+Internet speed: 200 Mbps
+
+Download time before playback starts = (4 GB × 8) / 200 Mbps
+                                     ≈ 160 seconds ≈ 2.7 minutes of waiting
+
+Plus: What if you watch 10 seconds and close the tab?
+      You wasted bandwidth downloading GBs you never watched.
+```
+
+This is where **buffering** became a pain point — you literally had to wait for the buffer to fill before you could watch.
+
+---
+
+## 4. Era 2: Real-Time Streaming Protocols (RTMP/RTSP)
+
+### What changed
+
+Two protocols emerged to solve progressive download's problems:
+
+| Protocol | Full Name | Creator |
+|---|---|---|
+| **RTMP** | Real-Time Messaging Protocol | Adobe |
+| **RTSP** | Real-Time Streaming Protocol | RealNetworks |
+
+### What they introduced
+
+```
+Before (Progressive Download):
+  Server → [Send entire file] → Client (play only after full download)
+
+After (RTMP/RTSP):
+  Server → [Send chunk 1] → Client plays chunk 1
+           [Send chunk 2] → Client plays chunk 2
+           [Send chunk 3] → Client plays chunk 3
+           ...and so on
+```
+
+### Benefits
+
+| Feature | Description |
+|---|---|
+| **Low latency** | Start playing almost immediately |
+| **Live streaming** | Stream in real time, not just pre-recorded |
+| **Efficient bandwidth** | Only download what you're actually watching |
+
+### The Remaining Problem
+
+Even though streaming in chunks was possible, the video was still encoded in **one single quality** (e.g., 4K).
+
+```
+Problem scenario:
+  Video: 4K (one quality)
+  User A: 65" TV, 300 Mbps → perfect ✅
+  User B: Mobile, 10 Mbps  → each 4K chunk is too large, buffering ❌
+  User C: Smartwatch        → why is this even 4K?? ❌
+
+There was no way to adapt quality based on the client's capabilities.
+```
+
+---
+
+## 5. Era 3: Adaptive Bitrate Streaming (ABR)
+
+> **Definition:** Adaptive Bitrate Streaming (ABR) is a technique where the video is encoded at **multiple quality levels**, and the client **dynamically selects** the best quality based on its current network speed, device screen size, and available bandwidth.
+
+### The Core Idea
+
+```
+Instead of:
+  One 4K video → served to everyone
+
+ABR does:
+  Same source video encoded into multiple qualities:
+    480p  (low quality, small file)
+    720p  (medium quality)
+    1080p (HD)
+    4K    (ultra HD, large file)
+
+Client decides which quality to use based on:
+  - Current network speed
+  - Screen resolution
+  - Device capabilities
+```
+
+### Why "Adaptive"?
+
+The quality **adapts in real time**. If you're watching 1080p and suddenly move to a weak network area:
+- The player detects lower bandwidth
+- Switches to 480p automatically
+- No buffering — just slightly reduced quality
+- When you return to strong network → switches back to 1080p
+
+```
+Network:  ████████░░░░████████
+Quality:  1080p → 480p → 1080p
+Experience: smooth → slightly blurry → smooth
+```
+
+This is dramatically better than the old alternative: high quality that freezes and buffers.
+
+---
+
+## 6. HLS: HTTP Live Streaming
+
+> **Full Name:** HTTP Live Streaming  
+> **Created by:** Apple  
+> **File extension:** `.m3u8`
+
+HLS is the most widely used ABR protocol today. It works over regular HTTP — meaning it uses the same infrastructure as websites, no special servers needed.
+
+### How HLS Works
+
+```
+                    ┌──────────────────────────────────────┐
+                    │         Video Processing Server       │
+                    │                                      │
+Source Video (4K) → │  Encode into:                        │
+                    │    480p  segments (seg1, seg2, seg3...) │
+                    │    720p  segments                    │
+                    │    1080p segments                    │
+                    │    4K    segments                    │
+                    │                                      │
+                    │  + Generate M3U8 index file          │
+                    └──────────────────────────────────────┘
+                                      │
+                                      ▼
+                            Stored on CDN / Server
+```
+
+---
+
+## 7. How Segments & the M3U8 Index File Work
+
+### What are Segments?
+
+The source video is **cut into small time-based chunks** called segments (typically 2–10 seconds each).
+
+```
+Full video (60 min) at 1080p:
+  → seg_1080_001.ts  (seconds 0–6)
+  → seg_1080_002.ts  (seconds 6–12)
+  → seg_1080_003.ts  (seconds 12–18)
+  ...and so on for every quality level
+```
+
+### The M3U8 Index File (Manifest / Playlist)
+
+This is a plain text file that acts like a **table of contents** for all the segments.
+
+```
+master.m3u8 (Master Playlist):
+─────────────────────────────────────────────
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x480
+/streams/480p/playlist.m3u8
+
+#EXT-X-STREAM-INF:BANDWIDTH=1400000,RESOLUTION=1280x720
+/streams/720p/playlist.m3u8
+
+#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1920x1080
+/streams/1080p/playlist.m3u8
+─────────────────────────────────────────────
+```
+
+The client reads this master file first, picks the best quality, then reads that quality's individual playlist.
+
+```
+480p/playlist.m3u8 (Quality-specific playlist):
+─────────────────────────────────────────────
+#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXTINF:6.0
+seg_480_001.ts
+#EXTINF:6.0
+seg_480_002.ts
+#EXTINF:6.0
+seg_480_003.ts
+...
+─────────────────────────────────────────────
+```
+
+### The Full Client Flow
+
+```
+Client Request Flow:
+─────────────────────────────────────────────
+Step 1: Client fetches master.m3u8
+          → sees available qualities: 480p, 720p, 1080p, 4K
+
+Step 2: Client evaluates itself:
+          - Screen resolution: 1920×1080
+          - Network speed: 280 Mbps
+          → Decision: I'll use 1080p
+
+Step 3: Client fetches 1080p/playlist.m3u8
+          → Gets list of segment URLs
+
+Step 4: Client downloads and plays segments one by one:
+          GET seg_1080_001.ts → play → GET seg_1080_002.ts → play...
+
+Step 5: Client continuously monitors network:
+          - Speed drops → switch to 720p/playlist.m3u8
+          - Speed recovers → switch back to 1080p/playlist.m3u8
+─────────────────────────────────────────────
+```
+
+---
+
+## 8. Video Processing Pipeline
+
+When a creator uploads a video (e.g., to YouTube), it doesn't appear instantly. It goes through a **processing pipeline**.
+
+```
+Creator uploads raw video (4K MP4)
+              │
+              ▼
+┌─────────────────────────────────┐
+│     Video Processing Pipeline   │
+│                                 │
+│  ffmpeg (or similar tool):      │
+│  ┌────────────────────────────┐ │
+│  │ Encode → 480p segments     │ │
+│  │ Encode → 720p segments     │ │
+│  │ Encode → 1080p segments    │ │
+│  │ Encode → 4K segments       │ │
+│  │ Generate M3U8 files        │ │
+│  └────────────────────────────┘ │
+└─────────────────────────────────┘
+              │
+              ▼
+    Store on CDN / Object Storage
+              │
+              ▼
+         Video is LIVE ✅
+```
+
+This is why YouTube videos take **20–30 minutes to process** after upload before being publicly available.
+
+### Tools for Encoding
+
+- **FFmpeg** — most common open-source video encoder
+- **AWS MediaConvert** — managed cloud encoding
+- **ImageKit** — managed platform handling encoding + HLS delivery
+- **Mux, Cloudflare Stream** — managed video hosting with ABR out of the box
+
+### Infrastructure Requirements
+
+Building this yourself requires:
+
+```
+1. Storage (S3, GCS) — store all segments (can be 3–4× the original size)
+2. Processing servers — CPU/GPU intensive encoding jobs
+3. CDN — deliver segments fast, close to the user
+4. Pipeline orchestration — queue, retry, monitor jobs
+5. Maintenance — significant engineering ongoing effort
+```
+
+> Most startups use managed solutions like **ImageKit, Mux, or Cloudflare Stream** rather than building this from scratch.
+
+---
+
+## 9. MPEG-DASH vs HLS
+
+Both are ABR protocols. They work similarly but have different origins and file formats.
+
+| Feature | HLS | MPEG-DASH |
+|---|---|---|
+| **Full Name** | HTTP Live Streaming | Dynamic Adaptive Streaming over HTTP |
+| **Created by** | Apple | MPEG consortium (open standard) |
+| **Index file** | `.m3u8` | `.mpd` (Media Presentation Description) |
+| **Segment format** | `.ts` (MPEG-2 TS) | `.mp4` fragments |
+| **Device support** | Excellent on Apple, wide support | Strong on Android/web |
+| **Usage today** | Most common on iOS/Safari | Common on Android/Chrome |
+
+```
+URL difference:
+  HLS:  https://cdn.example.com/video/master.m3u8
+  DASH: https://cdn.example.com/video/manifest.mpd
+```
+
+Both achieve the same goal. Today, most platforms support both.
+
+---
+
+## 10. Evolution Timeline
+
+```
+Video Delivery Evolution:
+──────────────────────────────────────────────────────
+Early 2000s: Progressive Download
+  → Download full file first, then play
+  → Massive buffering issues
+  → Bandwidth wasteful
+
+Mid 2000s: RTMP / RTSP (Specialized Streaming Protocols)
+  → Stream in chunks
+  → Low latency
+  → Live streaming possible
+  → BUT: single quality, no adaptation
+
+2009+: Adaptive Bitrate Streaming (HLS by Apple)
+  → Multiple quality levels pre-encoded
+  → Client selects quality dynamically
+  → Adapts to network conditions in real-time
+  → Works over standard HTTP (no special infra)
+
+Today: HLS + MPEG-DASH
+  → Standard for all major platforms
+  → CDN-accelerated delivery
+  → Client-side quality algorithms (very sophisticated)
+  → 4K, HDR, Dolby Atmos all delivered via ABR
+──────────────────────────────────────────────────────
+```
+
+---
+
+## 11. Key Takeaways
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                  Video Streaming Summary                      │
+├──────────────────────────────────────────────────────────────┤
+│                                                               │
+│  1. Video = sequence of frames (images) played rapidly        │
+│                                                               │
+│  2. Progressive Download = full file before play (old, bad)  │
+│                                                               │
+│  3. RTMP/RTSP = chunked streaming, but one quality only       │
+│                                                               │
+│  4. ABR = multiple quality encodings + client selects best    │
+│                                                               │
+│  5. HLS = Apple's ABR protocol using .m3u8 index files        │
+│                                                               │
+│  6. Segments = small time chunks of video at each quality     │
+│                                                               │
+│  7. M3U8 = index/manifest file pointing to all segments       │
+│                                                               │
+│  8. Client dynamically switches quality based on network      │
+│                                                               │
+│  9. Processing pipeline converts raw upload → multi-quality   │
+│     segments (this is why YouTube takes time to process)      │
+│                                                               │
+│  10. Building your own pipeline is costly → use managed       │
+│      services (ImageKit, Mux, Cloudflare Stream)              │
+│                                                               │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Further Reading
+
+- [Apple HLS Documentation](https://developer.apple.com/streaming/)
+- [MPEG-DASH Industry Forum](https://dashif.org/)
+- [ImageKit — Adaptive Bitrate Streaming Guide](https://imagekit.io/blog/adaptive-bitrate-streaming/)
+- [FFmpeg Documentation](https://ffmpeg.org/documentation.html)
+
+---
+
+*Notes compiled from: [How Video Streaming Works on Scale by Piyush Garg](https://www.youtube.com/watch?v=-JtjQ-OA7XE)*
+
+
+# 📚 System Design: How UPI Payments Work
+
+> **Source:** [Piyush Garg - System Design of UPI Payments](https://www.youtube.com/watch?v=fqySz1Me2pI)  
+> **Topic:** Traditional Banking → IMPS/NEFT/RTGS → UPI Architecture → NPCI → Transaction Flow
+
+---
+
+## Table of Contents
+
+1. [Traditional Banking & Money Transfer](#1-traditional-banking--money-transfer)
+2. [Legacy Transfer Protocols](#2-legacy-transfer-protocols)
+3. [What is UPI?](#3-what-is-upi)
+4. [Core Components of UPI](#4-core-components-of-upi)
+   - [NPCI](#41-npci---the-backbone)
+   - [VPA (Virtual Payment Address)](#42-vpa---virtual-payment-address)
+   - [PSP (Payment Service Provider)](#43-psp---payment-service-provider)
+5. [Complete UPI Transaction Flow](#5-complete-upi-transaction-flow)
+6. [Push vs Pull Mechanism](#6-push-vs-pull-mechanism)
+7. [What Happens When a Transaction Fails?](#7-what-happens-when-a-transaction-fails)
+8. [Participant Map](#8-participant-map)
+9. [Key Takeaways](#9-key-takeaways)
+
+---
+
+## 1. Traditional Banking & Money Transfer
+
+Before UPI, to transfer money digitally you needed all of these details about the recipient:
+
+```
+Required Information (Traditional Bank Transfer):
+┌─────────────────────────────────────────────┐
+│  Account Number  : 123456789012             │
+│  Bank Name       : ICICI Bank               │
+│  Branch Code     : 001                      │
+│  IFSC Code       : ICIC0000001              │
+│  Amount          : ₹1,000                   │
+└─────────────────────────────────────────────┘
+```
+
+**IFSC Code** (Indian Financial System Code) uniquely identifies:
+- Which bank the account belongs to
+- Which specific branch of that bank
+
+Without any one of these, the transaction would fail or be reversed.
+
+---
+
+## 2. Legacy Transfer Protocols
+
+India had multiple transfer systems before UPI, each for different use cases:
+
+| Protocol | Full Name | Speed | Best For | Limit |
+|---|---|---|---|---|
+| **IMPS** | Immediate Payment Service | Instant (seconds) | Small transfers | Up to ₹5 lakh |
+| **NEFT** | National Electronic Funds Transfer | 2–3 hours | Medium transfers | No fixed limit |
+| **RTGS** | Real Time Gross Settlement | Instant | Large transfers | Min ₹2 lakh |
+
+```
+Timeline of a NEFT transfer:
+  12:00 PM - You initiate transfer
+  12:00 PM - Bank processes in next batch
+   2:30 PM - Recipient receives the money
+
+Contrast with UPI:
+  12:00 PM - You initiate transfer
+  12:00 PM - Money received ← INSTANT
+```
+
+**Problems with these systems:**
+- Required complex account details (IFSC, account number)
+- Not always real-time
+- Poor UX for everyday consumers
+- No unified app experience across banks
+
+---
+
+## 3. What is UPI?
+
+> **UPI** = **Unified Payment Interface**
+
+UPI was built to make digital payments **as simple as knowing someone's ID** — no account numbers, no IFSC codes, no branch codes.
+
+```
+Traditional Transfer:
+  Account No: 123456789012
+  IFSC: ICIC0000001
+  Branch: Connaught Place, Delhi
+  → Complex, error-prone, hard to remember
+
+UPI Transfer:
+  piyush@icici
+  → Simple, memorable, shareable
+```
+
+UPI was built and is operated by **NPCI** (National Payments Corporation of India) under the regulation of **RBI** (Reserve Bank of India).
+
+---
+
+## 4. Core Components of UPI
+
+### 4.1 NPCI - The Backbone
+
+> **NPCI** = National Payments Corporation of India
+
+NPCI is the **infrastructure** that powers UPI. It is not a payment gateway or a consumer app — it's the backend network that all banks and payment apps plug into.
+
+```
+NPCI Architecture:
+┌─────────────────────────────────────────────┐
+│                  NPCI                        │
+│         (Closed, Trusted Network)           │
+│                                              │
+│  Only trusted banks can connect:            │
+│    ✅ ICICI Bank                             │
+│    ✅ HDFC Bank                              │
+│    ✅ SBI                                    │
+│    ✅ Yes Bank                               │
+│    ✅ Axis Bank                              │
+│    ✅ ...all major banks                     │
+│                                              │
+│  These CANNOT connect directly:             │
+│    ❌ PhonePe                                │
+│    ❌ Google Pay                             │
+│    ❌ Any public app or user                 │
+└─────────────────────────────────────────────┘
+```
+
+**Key facts about NPCI:**
+- APIs are **not publicly available**
+- Only RBI-regulated banks can talk to NPCI
+- It operates on a **secure, closed network**
+- Consumer apps (PhonePe, GPay) must **partner with a bank** to enter this network
+
+---
+
+### 4.2 VPA - Virtual Payment Address
+
+> **VPA** = Virtual Payment Address
+
+The VPA is the **human-readable ID** that replaces all the complex bank details.
+
+```
+Format:   username@handle
+
+Examples:
+  piyush@icici
+  john123@okhdfcbank
+  myshop@paytm
+  9876543210@ybl   (phone number as username, Yes Bank handle)
+```
+
+**When you scan a QR code**, you're not scanning anything fancy — the QR code simply encodes a VPA. It's just a lazy, error-free way to enter a VPA without typing.
+
+```
+QR Code = encoded VPA string
+Scanning QR code = automatically filling in the VPA field
+```
+
+### Common UPI Handles by Bank/App:
+
+| Handle | Linked To |
+|---|---|
+| `@icici` | ICICI Bank |
+| `@okhdfcbank` | HDFC via Google Pay |
+| `@ybl` | Yes Bank (via PhonePe) |
+| `@paytm` | Paytm Payments Bank |
+| `@okaxis` | Axis Bank via Google Pay |
+
+---
+
+### 4.3 PSP - Payment Service Provider
+
+> **PSP** = Payment Service Provider (also called Customer PSP or Third-Party App)
+
+PSPs are the **consumer-facing apps** like PhonePe, Google Pay, and Paytm. They:
+1. Provide the **UI/UX** for users to initiate payments
+2. **Partner with a bank** (their PSP bank) to get access to NPCI's network
+3. Forward payment requests from users to their partner bank
+
+```
+Consumer App → PSP Bank → NPCI Network
+
+PhonePe     → Yes Bank  → NPCI
+Google Pay  → ICICI / Axis / HDFC / SBI → NPCI
+Paytm       → Paytm Payments Bank → NPCI
+Amazon Pay  → Axis Bank → NPCI
+```
+
+```
+Architecture Layer Diagram:
+┌──────────────────────────────────────────────────────┐
+│  Layer 3: Consumer Apps (PSPs)                       │
+│  PhonePe | Google Pay | Paytm | Amazon Pay           │
+│  (UI + UX layer, handles user interaction)           │
+└────────────────────┬─────────────────────────────────┘
+                     │ (partners with)
+┌────────────────────▼─────────────────────────────────┐
+│  Layer 2: PSP Banks                                  │
+│  Yes Bank | ICICI | Axis | HDFC | SBI                │
+│  (trusted members of NPCI network)                   │
+└────────────────────┬─────────────────────────────────┘
+                     │ (connects to)
+┌────────────────────▼─────────────────────────────────┐
+│  Layer 1: NPCI                                       │
+│  Core UPI Infrastructure                            │
+│  Routes transactions between banks                  │
+└──────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. Complete UPI Transaction Flow
+
+### Scenario
+**User A** (PhonePe, Yes Bank) wants to send ₹1,000 to **Piyush** (Google Pay, ICICI Bank).
+
+```
+User A's VPA: userA@ybl      (Yes Bank handle)
+Piyush's VPA: piyush@icici   (ICICI handle)
+Amount: ₹1,000
+```
+
+### Step-by-Step Flow
+
+```
+Step 1: Create Payment Intent
+─────────────────────────────
+User A opens PhonePe
+Enters/scans Piyush's VPA: piyush@icici
+Enters amount: ₹1,000
+
+PhonePe creates a payment intent:
+{
+  from: "userA@ybl",
+  to:   "piyush@icici",
+  amount: 1000
+}
+
+Step 2: PSP → PSP Bank
+─────────────────────────────
+PhonePe (User A's PSP) cannot talk to NPCI directly.
+PhonePe sends this intent to its partner bank: Yes Bank
+
+Step 3: PSP Bank → NPCI
+─────────────────────────────
+Yes Bank (trusted NPCI member) puts the request
+into the NPCI network.
+
+NPCI accepts it because: it came from a trusted bank ✅
+
+Step 4: NPCI Verifies Balance
+─────────────────────────────
+NPCI sees: "userA@ybl wants to send ₹1,000"
+NPCI asks Yes Bank: "Does userA have ₹1,000?"
+Yes Bank: "Yes, balance is available" ✅
+
+Step 5: Authentication Request
+─────────────────────────────
+Yes Bank sends back to PhonePe:
+"Transaction looks good. Need UPI PIN authentication."
+
+PhonePe shows the UPI PIN screen to User A.
+User A enters UPI PIN.
+PhonePe sends the PIN back to Yes Bank.
+
+Step 6: Debit the Sender
+─────────────────────────────
+NPCI instructs Yes Bank:
+"Debit ₹1,000 from userA's account"
+
+Yes Bank debits ₹1,000 from User A's account ✅
+Yes Bank acknowledges to NPCI: "Debit successful"
+
+Step 7: Credit the Receiver
+─────────────────────────────
+NPCI looks up "piyush@icici"
+NPCI identifies: Piyush's bank is ICICI
+
+NPCI instructs ICICI Bank:
+"Credit ₹1,000 to Piyush's account"
+
+ICICI Bank credits ₹1,000 to Piyush's account ✅
+ICICI Bank acknowledges to NPCI: "Credit successful"
+
+Step 8: Notification
+─────────────────────────────
+Both acknowledgements received by NPCI → 
+Transaction marked as COMPLETE ✅
+
+ICICI Bank pushes notification to Google Pay (Piyush's PSP):
+"₹1,000 received from userA@ybl"
+
+Piyush sees on Google Pay: "Received ₹1,000 from User A" 🎉
+```
+
+### Visual Flow Diagram
+
+```
+User A                PhonePe       Yes Bank      NPCI       ICICI      Piyush
+(Sender)              (PSP)         (PSP Bank)             (Bank)     (Google Pay)
+   │                     │               │           │          │           │
+   │──intent──────────►  │               │           │          │           │
+   │                     │──request────► │           │          │           │
+   │                     │               │──put──────►│          │           │
+   │                     │               │           │──balance?►│           │
+   │                     │               │◄──ok───── │          │           │
+   │◄──PIN screen──────  │               │           │          │           │
+   │──PIN──────────────► │               │           │          │           │
+   │                     │──PIN───────►  │           │          │           │
+   │                     │               │──debit────►│          │           │
+   │                     │               │◄──ack───── │          │           │
+   │                     │               │           │──credit──►│           │
+   │                     │               │           │          │──notify──►│
+   │                     │               │           │          │           │
+   │                     ◄── COMPLETE ───────────────────────── │           │
+```
+
+---
+
+## 6. Push vs Pull Mechanism
+
+UPI supports two types of transactions:
+
+### Push Transaction (Most Common)
+> You **send** money to someone.
+
+```
+You → initiate → transfer → Recipient gets money
+Example: Paying a shopkeeper
+```
+
+### Pull Transaction
+> You **request** money from someone.
+
+```
+Recipient → sends payment request → You approve → Money sent
+Example:
+  - "Request Money" feature in apps
+  - Online shopping checkout (merchant pulls payment from you)
+  - Splitting bills
+```
+
+```
+Pull Flow:
+NPCI receives pull request from merchant
+NPCI notifies your UPI app: "Merchant X wants ₹500"
+You approve → same debit/credit flow as push
+```
+
+---
+
+## 7. What Happens When a Transaction Fails?
+
+### Scenario: ICICI's server was busy, couldn't acknowledge
+
+```
+NPCI sends credit request to ICICI ─────────────────────►
+ICICI server was busy ── cannot acknowledge ─────────────
+
+NPCI waits... timeout...
+NPCI: "No acknowledgement received from ICICI"
+NPCI: "Transaction must be rolled back"
+
+NPCI instructs Yes Bank: "Reverse the debit — credit ₹1,000 back to User A"
+Yes Bank credits ₹1,000 back to User A ✅
+
+User A sees: "Transaction failed, ₹1,000 refunded"
+```
+
+**This is why money sometimes shows as "debited" but then returns automatically** — the credit acknowledgement was never received, so the transaction was rolled back.
+
+```
+Two acknowledgements required for a COMPLETE transaction:
+  1. Debit ACK from sender's bank  ✅
+  2. Credit ACK from receiver's bank ✅
+
+If EITHER fails → transaction is reversed → money returned
+```
+
+---
+
+## 8. Participant Map
+
+```
+Full UPI Ecosystem:
+
+┌──────────────────────────────────────────────────────────┐
+│                    RBI (Regulator)                       │
+│               Regulates all participants                 │
+└───────────────────────────┬──────────────────────────────┘
+                            │
+┌───────────────────────────▼──────────────────────────────┐
+│                      NPCI                                │
+│              Core UPI Infrastructure                     │
+│    Routes payments, validates, settles transactions      │
+└──┬────────────────────────────────────────────────────┬──┘
+   │                                                    │
+   ▼                                                    ▼
+Issuing Bank                                    Acquiring Bank
+(Sender's Bank)                                 (Receiver's Bank)
+e.g. Yes Bank                                   e.g. ICICI Bank
+   │                                                    │
+   ▼                                                    ▼
+PSP Bank for                                    PSP Bank for
+Sender's App                                    Receiver's App
+   │                                                    │
+   ▼                                                    ▼
+Payer PSP                                       Payee PSP
+(PhonePe)                                       (Google Pay)
+   │                                                    │
+   ▼                                                    ▼
+Payer (User A)                                  Payee (Piyush)
+```
+
+### Google Pay's Partner Banks:
+`Axis Bank` | `ICICI Bank` | `HDFC Bank` | `SBI`
+
+### PhonePe's Partner Banks:
+`Yes Bank` | `ICICI Bank` | `Axis Bank`
+
+### Amazon Pay's Partner Banks:
+`Axis Bank`
+
+---
+
+## 9. Key Takeaways
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    UPI Summary                               │
+├──────────────────────────────────────────────────────────────┤
+│                                                               │
+│  1. VPA replaces complex bank details                         │
+│     (username@handle instead of account + IFSC)              │
+│                                                               │
+│  2. NPCI is the closed backbone — only banks can access it    │
+│                                                               │
+│  3. Consumer apps (PhonePe/GPay) partner with banks to        │
+│     enter the NPCI network                                    │
+│                                                               │
+│  4. QR code = just a VPA encoded for easy scanning           │
+│                                                               │
+│  5. Transaction requires TWO acks: debit + credit            │
+│     If either fails → automatic rollback/refund              │
+│                                                               │
+│  6. UPI supports Push (send) and Pull (request) flows         │
+│                                                               │
+│  7. NPCI handles billions of transactions — incredibly        │
+│     fault-tolerant, real-time engineering                     │
+│                                                               │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Comparison: Old vs UPI
+
+| Feature | Traditional | UPI |
+|---|---|---|
+| **Recipient ID needed** | Account no + IFSC + branch | Just a VPA (e.g., name@bank) |
+| **Speed** | Hours (NEFT) or instant (IMPS) | Always instant |
+| **UX** | Complex, bank-specific | Unified, any app |
+| **Interoperability** | Limited | Works across all banks |
+| **Live transfers** | IMPS only | All UPI transfers |
+
+---
+
+## Further Reading
+
+- [RazorPay — What is UPI and How it Works](https://razorpay.com/learn/what-is-upi/)
+- [NPCI Official UPI Page](https://www.npci.org.in/what-we-do/upi/product-overview)
+- [Google Pay — UPI Transaction Responsibilities](https://pay.google.com/intl/en_in/about/policy/)
+
+---
+
+*Notes compiled from: [System Design of UPI Payments by Piyush Garg](https://www.youtube.com/watch?v=fqySz1Me2pI)*
