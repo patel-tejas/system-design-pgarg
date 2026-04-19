@@ -3861,3 +3861,519 @@ Payer (User A)                                  Payee (Piyush)
 ---
 
 *Notes compiled from: [System Design of UPI Payments by Piyush Garg](https://www.youtube.com/watch?v=fqySz1Me2pI)*
+
+
+# System Design Patterns You Should Master
+> **Channel:** Piyush Garg  
+> **Series:** System Design Crash Course
+
+---
+
+## Table of Contents
+
+1. [Microservices vs Monolith](#microservices-vs-monolith)
+2. [Database per Service](#database-per-service)
+3. [Circuit Breaker Pattern](#circuit-breaker-pattern)
+4. [Event Sourcing](#event-sourcing)
+5. [CQRS (Command Query Responsibility Segregation)](#cqrs)
+6. [Pattern Relationships & When to Use What](#pattern-relationships--when-to-use-what)
+
+---
+
+## Microservices vs Monolith
+
+The very first architectural decision in any system design.
+
+### Monolith Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    MONOLITH SERVER                          │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │                Single Codebase                      │   │
+│  │                                                     │   │
+│  │  /auth routes         /notifications handlers       │   │
+│  │  /posts routes        /comments routes              │   │
+│  │  /payments routes     /users routes                 │   │
+│  │                                                     │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                          │                                  │
+│                   Single Database                           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Scaling a monolith:** You can still run multiple instances, but you scale the entire server — not individual features.
+
+```
+┌──────────┐    ┌──────────┐    ┌──────────┐
+│ Instance │    │ Instance │    │ Instance │
+│    1     │    │    2     │    │    3     │
+│ (full    │    │ (full    │    │ (full    │
+│  app)    │    │  app)    │    │  app)    │
+└──────────┘    └──────────┘    └──────────┘
+```
+
+### Microservices Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  MICROSERVICES ARCHITECTURE                     │
+│                                                                 │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐        │
+│  │  Auth        │   │ Notification │   │   Post       │        │
+│  │  Service     │   │  Service     │   │   Service    │        │
+│  │  (Node.js)   │   │  (Python)    │   │   (Rust)     │        │
+│  │  AWS         │   │  GCP         │   │   Azure      │        │
+│  └──────────────┘   └──────────────┘   └──────────────┘        │
+│         ↕                   ↕                  ↕               │
+│  Each service independently deployed, scaled, and maintained   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Side-by-Side Comparison
+
+| Aspect | Monolith | Microservices |
+|--------|----------|---------------|
+| **Deployment** | Deploy everything together | Deploy each service independently |
+| **Scaling** | Scale the whole app | Scale only what needs it |
+| **Fault isolation** | One bug can crash everything | Failed service doesn't bring down others |
+| **Tech flexibility** | One language/framework | Each service picks its own stack |
+| **Management** | Simple — one server | Complex — N servers to manage |
+| **Communication** | In-process function calls | Network calls (HTTP, gRPC, events) |
+| **Best for** | Small teams, early-stage products | Large teams, complex at-scale systems |
+
+> **Rule of thumb:** Start with a monolith. Move to microservices when you have clear domain boundaries, separate team ownership, or wildly different scaling needs per feature.
+
+---
+
+## Database per Service
+
+Once you choose microservices, the next question: **do each service get their own database?**
+
+### Shared Database (Anti-pattern at scale)
+
+```
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│    Auth      │   │  File Upload │   │ Notification │
+│   Service    │   │   Service    │   │   Service    │
+└──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+       │                  │                  │
+       └──────────────────┼──────────────────┘
+                          │
+                   ┌──────▼──────┐
+                   │  SHARED DB  │
+                   │ (Postgres)  │
+                   │             │
+                   │ users       │
+                   │ uploads     │
+                   │ notifictions│
+                   └─────────────┘
+
+Problems:
+❌ Notification service can accidentally DELETE users
+❌ File service bug can corrupt user data
+❌ Not true isolation — shared bottleneck
+❌ Schema changes in one table affect all services
+```
+
+### Database per Service (Recommended)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  DATABASE PER SERVICE                            │
+│                                                                  │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐         │
+│  │    Auth      │   │  Notification│   │    Post      │         │
+│  │   Service    │   │   Service    │   │   Service    │         │
+│  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘         │
+│         │                  │                  │                  │
+│         ▼                  ▼                  ▼                  │
+│  ┌─────────────┐  ┌─────────────┐   ┌─────────────┐             │
+│  │  MongoDB    │  │  ClickHouse │   │  PostgreSQL  │             │
+│  │             │  │             │   │              │             │
+│  │ (schema     │  │ (analytics: │   │ (relational  │             │
+│  │  flexible,  │  │  open rates,│   │  posts,      │             │
+│  │  users)     │  │  click data)│   │  comments)   │             │
+│  └─────────────┘  └─────────────┘   └─────────────┘             │
+│                                                                  │
+│  ✅ True isolation         ✅ Choose best DB per use case        │
+│  ✅ Independent scaling    ✅ Independent indexing strategy      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### The Trade-off: Application-Level Joins
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              THE JOIN PROBLEM                                    │
+│                                                                  │
+│  Old way (shared DB):                                            │
+│  SELECT posts.*, users.name                                      │
+│  FROM posts JOIN users ON posts.user_id = users.id               │
+│  ← Single SQL query, done.                                       │
+│                                                                  │
+│  New way (DB per service):                                       │
+│                                                                  │
+│  1. Post Service: SELECT * FROM posts WHERE user_id = 42         │
+│          │                                                       │
+│          ▼                                                       │
+│  2. HTTP call to Auth Service: GET /users/42                     │
+│          │                                                       │
+│          ▼                                                       │
+│  3. Application code merges the two results                      │
+│                                                                  │
+│  ❌ Extra network hop       ❌ More code complexity              │
+│  ✅ True service isolation  ✅ Worth it at large scale           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Circuit Breaker Pattern
+
+Prevents a failed service from cascading failures across your entire system.
+
+### The Problem: Cascading Failures
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  CASCADE FAILURE (No Circuit Breaker)            │
+│                                                                  │
+│  Service A ──► Service B ──► Service C ──► Service D             │
+│                                              (DOWN 💀)           │
+│                                                                  │
+│  Step 1: D is down                                               │
+│  Step 2: C keeps retrying D → C gets overwhelmed → C crashes    │
+│  Step 3: B keeps retrying C → B gets overwhelmed → B crashes    │
+│  Step 4: A keeps retrying B → A gets overwhelmed → A crashes    │
+│                                                                  │
+│  Result: ONE service failure brings down ENTIRE system           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### The Solution: Circuit Breaker States
+
+The circuit breaker sits as a **proxy** between services and has 3 states:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│               CIRCUIT BREAKER STATE MACHINE                     │
+│                                                                  │
+│                    failures < threshold                          │
+│              ┌─────────────────────────────────┐                │
+│              │                                 │                │
+│              ▼                                 │                │
+│    ┌─────────────────┐    failures             │                │
+│    │    CLOSED       │    exceed threshold     │                │
+│    │  (Normal flow)  │ ──────────────────────► │                │
+│    │  Requests pass  │                         │                │
+│    └─────────────────┘                         │                │
+│                                                │                │
+│                                      ┌─────────▼───────┐        │
+│                                      │      OPEN       │        │
+│                                      │  (Fail fast)    │        │
+│                                      │  Block requests │        │
+│                                      │  Return error   │        │
+│                                      │  immediately    │        │
+│                                      └─────────┬───────┘        │
+│                                                │                │
+│                                  timeout passes│                │
+│                                                │                │
+│    ┌─────────────────┐                         │                │
+│    │   HALF-OPEN     │ ◄───────────────────────┘                │
+│    │  (Testing)      │                                          │
+│    │ Allow 1 request │                                          │
+│    │ to test service │                                          │
+│    └────────┬────────┘                                          │
+│             │           │                                       │
+│        success          failure                                  │
+│             │           │                                       │
+│             ▼           ▼                                       │
+│          CLOSED        OPEN                                      │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Circuit Breaker in Action
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              ARCHITECTURE WITH CIRCUIT BREAKER                  │
+│                                                                  │
+│  Service A                                                       │
+│      │                                                           │
+│      ▼                                                           │
+│  ┌─────────────────┐     CLOSED: requests flow through          │
+│  │ Circuit Breaker │ ──► Service B (healthy) ──► Response       │
+│  │    Proxy        │                                            │
+│  └─────────────────┘                                            │
+│      │                                                           │
+│      │  Service B starts failing...                             │
+│      │                                                           │
+│  ┌─────────────────┐     OPEN: requests blocked                 │
+│  │ Circuit Breaker │ ──► Returns error immediately              │
+│  │    Proxy        │     (no retry to Service B)                │
+│  └─────────────────┘                                            │
+│      │                                                           │
+│      │  After timeout interval...                               │
+│      │                                                           │
+│  ┌─────────────────┐     HALF-OPEN: test 1 request              │
+│  │ Circuit Breaker │ ──► Service B (recovering?) ──► Success?   │
+│  │    Proxy        │                                            │
+│  └─────────────────┘     If yes → CLOSED again ✅               │
+│                          If no  → OPEN again  ❌               │
+│                                                                  │
+│  Benefit: Service B can recover without being bombarded         │
+│  by retries from all upstream services                           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Libraries that implement Circuit Breaker:**
+- Node.js: `opossum`
+- Java: `Resilience4j`, `Hystrix`
+- Go: `gobreaker`
+- Python: `circuitbreaker`
+
+---
+
+## Event Sourcing
+
+Instead of storing the **current state**, store every **event** that led to that state.
+
+### Traditional Approach (Mutable State)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              TRADITIONAL — MUTABLE STATE                        │
+│                                                                  │
+│  Orders Table:                                                   │
+│  ┌────────┬──────────────────────┐                              │
+│  │ ID     │ State                │                              │
+│  ├────────┼──────────────────────┤                              │
+│  │ #1234  │ PLACED               │  ← gets overwritten          │
+│  │ #1234  │ READY_TO_SHIP        │  ← overwritten               │
+│  │ #1234  │ SHIPPING             │  ← overwritten               │
+│  │ #1234  │ DELIVERED            │  ← current state             │
+│  └────────┴──────────────────────┘                              │
+│                                                                  │
+│  At any moment only ONE row exists per order                     │
+│                                                                  │
+│  Problems at scale:                                              │
+│  ❌ Requires locking rows during updates                         │
+│  ❌ No history of what happened                                  │
+│  ❌ Concurrent updates cause conflicts                           │
+│  ❌ Hard to audit or debug past behavior                         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Event Sourcing Approach (Immutable Log)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              EVENT SOURCING — APPEND-ONLY LOG                   │
+│                                                                  │
+│  Event Stream (Immutable):                                       │
+│  ┌────────────┬──────────────────────┬──────────────────────┐   │
+│  │ Timestamp  │ Event                │ Payload              │   │
+│  ├────────────┼──────────────────────┼──────────────────────┤   │
+│  │ 12:00:00   │ ORDER_PLACED         │ { item: "shoes" }    │   │
+│  │ 12:10:00   │ READY_TO_SHIP        │ { warehouse: "MH1" } │   │
+│  │ 12:30:00   │ SHIPPING_STARTED     │ { carrier: "FedEx" } │   │
+│  │ 15:45:00   │ OUT_FOR_DELIVERY     │ { agent: "Bob" }     │   │
+│  │ 17:00:00   │ DELIVERED            │ { lat: 19.2, lng: 73}│   │
+│  └────────────┴──────────────────────┴──────────────────────┘   │
+│              ↑ Events are NEVER deleted or modified              │
+│                                                                  │
+│  "What is the current state of order #1234?"                     │
+│  → Replay all events → derive current state                      │
+│                                                                  │
+│  ✅ No locking needed      ✅ Full audit trail                   │
+│  ✅ Debug any point in time ✅ Replay to rebuild state           │
+│  ✅ Append-only = fast writes                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Real-world Example: Banking
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│           BANKING — CLASSIC EVENT SOURCING                      │
+│                                                                  │
+│  NOT stored:     balance = $300   ← never a single mutable value │
+│                                                                  │
+│  ACTUALLY stored: list of transactions                           │
+│  ┌────────────────────────────────────────┐                     │
+│  │ +$500  (salary credited)               │                     │
+│  │ -$150  (rent deducted)                 │                     │
+│  │ -$50   (groceries)                     │                     │
+│  │ +$100  (refund received)               │                     │
+│  │ -$100  (transfer to savings)           │                     │
+│  └────────────────────────────────────────┘                     │
+│                                                                  │
+│  "What is my current balance?"                                   │
+│  → Sum all transactions → $300                                   │
+│                                                                  │
+│  Why? Any dispute → full trail exists                            │
+│  Regulatory audit → every transaction verifiable                 │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## CQRS
+
+**Command Query Responsibility Segregation** — naturally pairs with Event Sourcing.
+
+### The Problem It Solves
+
+At Amazon-scale, a single database handling both reads and writes becomes the bottleneck:
+- Writes need strong consistency and transaction locks
+- Reads need speed, denormalized data, and complex aggregations
+- Mixing both on one DB creates contention
+
+### CQRS Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                         CQRS PATTERN                            │
+│                                                                  │
+│  User Action                                                     │
+│      │                                                           │
+│      ▼                                                           │
+│  API Gateway                                                     │
+│      │                                                           │
+│  ┌───┴────────────────────────────────────────────────┐         │
+│  │ Route by HTTP Method                               │         │
+│  └───┬─────────────────────────────────────────┬──────┘         │
+│      │ POST/PUT/PATCH/DELETE                   │ GET             │
+│      ▼                                         ▼                │
+│ ┌──────────────┐                        ┌──────────────┐        │
+│ │   COMMAND    │                        │    QUERY     │        │
+│ │    SIDE      │                        │    SIDE      │        │
+│ │              │                        │              │        │
+│ │ Validate     │                        │ Read Model   │        │
+│ │ Authorize    │                        │ (optimized   │        │
+│ │ Generate     │                        │  for reads)  │        │
+│ │ Event        │                        │              │        │
+│ └──────┬───────┘                        └──────┬───────┘        │
+│        │                                       │                │
+│        ▼                                       ▼                │
+│ ┌─────────────┐    Event    ┌─────────────────────────┐        │
+│ │  Write DB   │ ──────────► │       Read DB           │        │
+│ │ (normalized │   Stream    │  (denormalized,         │        │
+│ │  SQL)       │             │   pre-joined JSON)      │        │
+│ │             │             │   MongoDB/DynamoDB       │        │
+│ └─────────────┘             └─────────────────────────┘        │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Why Two Databases?
+
+```
+┌──────────────────────────────┬──────────────────────────────────┐
+│         WRITE DB             │           READ DB                │
+├──────────────────────────────┼──────────────────────────────────┤
+│ Normalized SQL               │ Denormalized NoSQL               │
+│ Multiple tables + joins      │ Pre-joined as flat JSON          │
+│ ACID transactions            │ Optimized for fast lookups       │
+│ Source of truth              │ Derived / materialized view      │
+│                              │                                  │
+│ Example query:               │ Example query:                   │
+│ SELECT p.*, u.name,          │ db.products.findOne({_id: 123})  │
+│   s.stock, r.avg_rating      │ → returns full product doc       │
+│ FROM products p              │   with all nested details        │
+│ JOIN users u ON ...          │   NO JOINS NEEDED                │
+│ JOIN stock s ON ...          │                                  │
+│ JOIN reviews r ON ...        │                                  │
+│ (slow at scale)              │ (fast at scale)                  │
+└──────────────────────────────┴──────────────────────────────────┘
+```
+
+### CQRS with Event Sourcing Combined
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│          CQRS + EVENT SOURCING TOGETHER                         │
+│                                                                  │
+│  1. User places order                                            │
+│          │                                                       │
+│          ▼                                                       │
+│  2. Command handler validates + generates event:                 │
+│     { type: "ORDER_PLACED", orderId: 123, ... }                  │
+│          │                                                       │
+│          ▼                                                       │
+│  3. Event appended to append-only log (Kafka/Kinesis)           │
+│          │                                                       │
+│     ┌────┴─────────────────────────────┐                        │
+│     ▼                                  ▼                        │
+│  4a. Write DB updated               4b. Read DB projection      │
+│     (normalized state)                  built/updated           │
+│                                         (denormalized)          │
+│          │                                                       │
+│          ▼                                                       │
+│  5. Read DB corrupted/stale?                                    │
+│     → Replay all events from log → Rebuild Read DB ✅           │
+│                                                                  │
+│  Trade-off: Eventual consistency between Write DB & Read DB     │
+│  (usually 1-2 second delay — acceptable for most systems)       │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**When is eventual consistency NOT acceptable?**
+Stock market trades, financial settlements, medical records — anywhere where stale data causes real harm.
+
+---
+
+## Pattern Relationships & When to Use What
+
+These patterns don't exist in isolation — they form a natural progression:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│            PATTERN DECISION FLOW                                 │
+│                                                                  │
+│  Are you building a new system?                                  │
+│       │                                                          │
+│       ▼                                                          │
+│  Small team / early stage?                                       │
+│  → Use MONOLITH. Simpler, faster to build.                       │
+│                                                                  │
+│  Large team / clear domain boundaries?                           │
+│  → Use MICROSERVICES.                                            │
+│       │                                                          │
+│       ▼                                                          │
+│  Need true service isolation?                                    │
+│  → Use DATABASE PER SERVICE.                                     │
+│  → Accept: joins become application-level                        │
+│       │                                                          │
+│       ▼                                                          │
+│  Services calling each other?                                    │
+│  → Add CIRCUIT BREAKERS to prevent cascade failures.             │
+│       │                                                          │
+│       ▼                                                          │
+│  High throughput? Many writes? Need audit trail?                 │
+│  → Use EVENT SOURCING (append-only log as truth).                │
+│       │                                                          │
+│       ▼                                                          │
+│  Read and write loads have different scaling requirements?       │
+│  → Use CQRS to separate read and write models.                   │
+│  → Works naturally on top of Event Sourcing.                     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Quick Reference Card
+
+| Pattern | Problem Solved | Key Trade-off |
+|---------|---------------|---------------|
+| **Microservices** | Independent deployment & scaling | Inter-service communication complexity |
+| **Monolith** | Simplicity & cohesion | Cannot scale individual features |
+| **DB per Service** | True data isolation | Joins become application-level |
+| **Circuit Breaker** | Cascade failure prevention | Added proxy layer latency |
+| **Event Sourcing** | Immutable audit trail, high-throughput writes | More storage, eventual state derivation |
+| **CQRS** | Separate read/write optimization | Eventual consistency between DBs |
+
+---
